@@ -1,0 +1,76 @@
+name: ロト6・ロト7 当せん番号の収集
+
+on:
+  schedule:
+    # 毎日 22:30(日本時間)に動かす。GitHub の時刻は UTC なので 13:30 と書く。
+    - cron: "30 13 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "動かし方(test=ページを少し試すだけ / init-short=直近を少し保存 / init=第1回から全回分を保存 / daily=新しい回だけ足す)"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - init-short
+          - init
+          - daily
+      max_minutes:
+        description: "この分数をこえたら、そこまでを保存して止まる(init を何回かに分けたいとき用。ふつうは 100 のまま)"
+        required: false
+        default: "100"
+
+# 同時に2つ動かさない(CSV がぶつからないように)
+concurrency:
+  group: collect-loto
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      MODE: ${{ github.event.inputs.mode || 'daily' }}
+      MAX_MINUTES: ${{ github.event.inputs.max_minutes || '100' }}
+    steps:
+      - name: リポジトリを取り込む
+        uses: actions/checkout@v4
+
+      - name: Python を用意
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 部品を入れる(見えない Chrome を含む)
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 収集する
+        run: python collect_loto.py "$MODE" --out . --max-minutes "$MAX_MINUTES"
+
+      - name: 保存する(変更があったときだけ。途中で止まったときも、そこまでを保存する)
+        if: ${{ always() && env.MODE != 'test' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- loto6.csv loto7.csv || true
+          if git diff --cached --quiet; then
+            echo "変更なし(新しい回はありませんでした)"
+          else
+            git commit -m "ロト データ更新 (${MODE})"
+            git push
+          fi
+
+      - name: 確認用ファイルを残す(うまくいかなかったとき・test のとき)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: loto-debug
+          path: debug
+          if-no-files-found: ignore
+          retention-days: 14
